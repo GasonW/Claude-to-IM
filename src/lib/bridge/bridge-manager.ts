@@ -96,11 +96,12 @@ async function deliverResponse(
   address: ChannelAddress,
   responseText: string,
   sessionId: string,
+  replyToMessageId?: string,
 ): Promise<SendResult> {
   if (adapter.channelType === 'telegram') {
     const chunks = markdownToTelegramChunks(responseText, 4096);
     if (chunks.length > 0) {
-      return deliverRendered(adapter, address, chunks, { sessionId });
+      return deliverRendered(adapter, address, chunks, { sessionId, replyToMessageId });
     }
     return { ok: true };
   }
@@ -112,6 +113,7 @@ async function deliverResponse(
         address,
         text: chunks[i].text,
         parseMode: 'Markdown',
+        replyToMessageId,
       }, { sessionId });
       if (!result.ok) return result;
     }
@@ -123,6 +125,7 @@ async function deliverResponse(
       address,
       text: responseText,
       parseMode: 'Markdown',
+      replyToMessageId,
     }, { sessionId });
   }
   // Generic fallback: deliver as plain text (deliver() handles chunking internally)
@@ -130,6 +133,7 @@ async function deliverResponse(
     address,
     text: responseText,
     parseMode: 'plain',
+    replyToMessageId,
   }, { sessionId });
 }
 
@@ -551,17 +555,19 @@ async function handleMessage(
         perm.toolInput,
         binding.codepilotSessionId,
         perm.suggestions,
+        msg.messageId,
       );
     }, taskAbort.signal, hasAttachments ? msg.attachments : undefined, onPartialText);
 
     // Send response text — render via channel-appropriate format
     if (result.responseText) {
-      await deliverResponse(adapter, msg.address, result.responseText, binding.codepilotSessionId);
+      await deliverResponse(adapter, msg.address, result.responseText, binding.codepilotSessionId, msg.messageId);
     } else if (result.hasError) {
       const errorResponse: OutboundMessage = {
         address: msg.address,
         text: `<b>Error:</b> ${escapeHtml(result.errorMessage)}`,
         parseMode: 'HTML',
+        replyToMessageId: msg.messageId,
       };
       await deliver(adapter, errorResponse);
     }
@@ -571,9 +577,9 @@ async function handleMessage(
     // stale ID so the next message starts fresh instead of retrying a broken resume.
     if (binding.id) {
       try {
-        if (result.sdkSessionId) {
+        if (result.sdkSessionId && !result.hasError) {
           store.updateChannelBinding(binding.id, { sdkSessionId: result.sdkSessionId });
-        } else if (result.hasError && binding.sdkSessionId) {
+        } else if (result.hasError) {
           store.updateChannelBinding(binding.id, { sdkSessionId: '' });
         }
       } catch { /* best effort */ }
@@ -626,6 +632,7 @@ async function handleCommand(
       address: msg.address,
       text: `Command rejected: invalid input detected.`,
       parseMode: 'plain',
+      replyToMessageId: msg.messageId,
     });
     return;
   }
@@ -799,6 +806,7 @@ async function handleCommand(
       address: msg.address,
       text: response,
       parseMode: 'HTML',
+      replyToMessageId: msg.messageId,
     });
   }
 }

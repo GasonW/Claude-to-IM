@@ -33,6 +33,7 @@ export async function forwardPermissionRequest(
   toolInput: Record<string, unknown>,
   sessionId?: string,
   suggestions?: unknown[],
+  replyToMessageId?: string,
 ): Promise<void> {
   const { store } = getBridgeContext();
 
@@ -56,29 +57,56 @@ export async function forwardPermissionRequest(
     ? inputStr.slice(0, 300) + '...'
     : inputStr;
 
-  const text = [
-    `<b>Permission Required</b>`,
-    ``,
-    `Tool: <code>${escapeHtml(toolName)}</code>`,
-    `<pre>${escapeHtml(truncatedInput)}</pre>`,
-    ``,
-    `Choose an action:`,
-  ].join('\n');
+  let result: import('./types').SendResult;
 
-  const message: OutboundMessage = {
-    address,
-    text,
-    parseMode: 'HTML',
-    inlineButtons: [
-      [
-        { text: 'Allow', callbackData: `perm:allow:${permissionRequestId}` },
-        { text: 'Allow Session', callbackData: `perm:allow_session:${permissionRequestId}` },
-        { text: 'Deny', callbackData: `perm:deny:${permissionRequestId}` },
+  if (adapter.channelType === 'qq') {
+    // QQ: plain text permission prompt with copyable /perm commands (no inline buttons)
+    const qqText = [
+      `Permission Required`,
+      ``,
+      `Tool: ${toolName}`,
+      truncatedInput,
+      ``,
+      `Reply with one of:`,
+      `/perm allow ${permissionRequestId}`,
+      `/perm allow_session ${permissionRequestId}`,
+      `/perm deny ${permissionRequestId}`,
+    ].join('\n');
+
+    const qqMessage: OutboundMessage = {
+      address,
+      text: qqText,
+      parseMode: 'plain',
+      replyToMessageId,
+    };
+
+    result = await deliver(adapter, qqMessage, { sessionId });
+  } else {
+    const text = [
+      `<b>Permission Required</b>`,
+      ``,
+      `Tool: <code>${escapeHtml(toolName)}</code>`,
+      `<pre>${escapeHtml(truncatedInput)}</pre>`,
+      ``,
+      `Choose an action:`,
+    ].join('\n');
+
+    const message: OutboundMessage = {
+      address,
+      text,
+      parseMode: 'HTML',
+      inlineButtons: [
+        [
+          { text: 'Allow', callbackData: `perm:allow:${permissionRequestId}` },
+          { text: 'Allow Session', callbackData: `perm:allow_session:${permissionRequestId}` },
+          { text: 'Deny', callbackData: `perm:deny:${permissionRequestId}` },
+        ],
       ],
-    ],
-  };
+      replyToMessageId,
+    };
 
-  const result = await deliver(adapter, message, { sessionId });
+    result = await deliver(adapter, message, { sessionId });
+  }
 
   // Record the link so we can match callback queries back to this permission
   if (result.ok && result.messageId) {

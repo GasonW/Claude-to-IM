@@ -156,7 +156,18 @@ export async function deliver(
   }
 
   const limit = limits[adapter.channelType] || 4096;
-  const chunks = chunkText(message.text, limit);
+  let chunks = chunkText(message.text, limit);
+
+  // QQ: limit to max 3 segments to avoid flooding
+  if (adapter.channelType === 'qq' && chunks.length > 3) {
+    const first2 = chunks.slice(0, 2);
+    let merged = chunks.slice(2).join('\n');
+    if (merged.length > limit) {
+      merged = merged.slice(0, limit - 25) + '\n[... response truncated]';
+    }
+    chunks = [...first2, merged];
+  }
+
   let lastMessageId: string | undefined;
 
   for (let i = 0; i < chunks.length; i++) {
@@ -173,6 +184,8 @@ export async function deliver(
       text: chunks[i],
       // Only attach inline buttons to the last chunk
       inlineButtons: i === chunks.length - 1 ? message.inlineButtons : undefined,
+      // Pass through replyToMessageId for platforms that need it (e.g. QQ passive reply)
+      replyToMessageId: message.replyToMessageId,
     };
 
     const result = await sendWithRetry(adapter, chunkMessage);
@@ -270,7 +283,7 @@ export async function deliverRendered(
   adapter: BaseChannelAdapter,
   address: ChannelAddress,
   chunks: TelegramChunk[],
-  opts?: { sessionId?: string; dedupKey?: string },
+  opts?: { sessionId?: string; dedupKey?: string; replyToMessageId?: string },
 ): Promise<SendResult> {
   const { store } = getBridgeContext();
 
@@ -298,6 +311,7 @@ export async function deliverRendered(
       address,
       text: chunk.html,
       parseMode: 'HTML',
+      replyToMessageId: opts?.replyToMessageId,
     };
 
     // Try HTML first, fall back to plain text on parse error
