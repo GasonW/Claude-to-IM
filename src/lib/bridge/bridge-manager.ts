@@ -863,11 +863,42 @@ async function handleCommand(
         response = 'Invalid session ID format. Expected a 32-64 character hex/UUID string.';
         break;
       }
+
+      const { store } = getBridgeContext();
+      const jsonStore = store as any;
+
+      // Check if it's an active CLI session (for warning)
+      let isActiveCliSession = false;
+      if (jsonStore.getCliSession) {
+        const cliSession = jsonStore.getCliSession(args);
+        isActiveCliSession = cliSession && cliSession.isActive;
+      }
+
       const binding = router.bindToSession(msg.address, args);
+
       if (binding) {
-        response = `Bound to session <code>${args.slice(0, 8)}...</code>`;
+        const lines = [];
+        lines.push(`Bound to session <code>${args.slice(0, 8)}...</code>`);
+        lines.push(`CWD: <code>${escapeHtml(binding.workingDirectory || '~')}</code>`);
+
+        // Show sdkSessionId for terminal resume
+        if (binding.sdkSessionId) {
+          lines.push('');
+          lines.push('To resume in terminal:');
+          lines.push(`<code>claude --resume ${binding.sdkSessionId}</code>`);
+        }
+
+        // Warning if CLI session is still active
+        if (isActiveCliSession) {
+          lines.push('');
+          lines.push('<b>⚠️ Warning:</b> This CLI session is still running.');
+          lines.push('Concurrent edits may cause conflicts.');
+          lines.push('Consider closing the terminal session before continuing.');
+        }
+
+        response = lines.join('\n');
       } else {
-        response = 'Session not found.';
+        response = 'Session not found. Use <code>/sessions</code> to list available sessions.';
       }
       break;
     }
@@ -913,15 +944,97 @@ async function handleCommand(
     }
 
     case '/sessions': {
+      const { store } = getBridgeContext();
+      const jsonStore = store as any;
+
+      // 1. Get Bridge bindings
       const bindings = router.listBindings(adapter.channelType);
-      if (bindings.length === 0) {
+
+      // 2. Get CLI sessions (if store supports it)
+      const cliSessions = jsonStore.listCliSessions ? jsonStore.listCliSessions() : [];
+
+      // 3. Combined session item interface
+      interface SessionItem {
+        type: 'bridge' | 'cli';
+        id: string;           // ID used for /bind
+        sdkSessionId: string;  // ID used for claude --resume
+        cwd: string;
+        isActive: boolean;
+        startedAt: number;
+      }
+
+      const items: SessionItem[] = [];
+
+      // Add Bridge bindings
+      for (const b of bindings) {
+        // Get startedAt from BridgeSession if available
+        const session = store.getSession(b.codepilotSessionId);
+        const sessionAny = session as any;
+        items.push({
+          type: 'bridge',
+          id: b.codepilotSessionId,
+          sdkSessionId: b.sdkSessionId,
+          cwd: b.workingDirectory,
+          isActive: b.active,
+          startedAt: sessionAny?.created_at
+            ? new Date(sessionAny.created_at).getTime()
+            : new Date(b.createdAt || 0).getTime(),
+        });
+      }
+
+      // Add CLI sessions
+      for (const c of cliSessions) {
+        items.push({
+          type: 'cli',
+          id: c.sessionId,      // CLI sessions use sdkSessionId for binding
+          sdkSessionId: c.sessionId,
+          cwd: c.cwd,
+          isActive: c.isActive,
+          startedAt: c.startedAt,
+        });
+      }
+
+      // Sort by startedAt descending (newest first)
+      items.sort((a, b) => b.startedAt - a.startedAt);
+
+      // 4. Format output
+      if (items.length === 0) {
         response = 'No sessions found.';
       } else {
         const lines = ['<b>Sessions:</b>', ''];
-        for (const b of bindings.slice(0, 10)) {
-          const active = b.active ? 'active' : 'inactive';
-          lines.push(`<code>${b.codepilotSessionId.slice(0, 8)}...</code> [${active}] ${escapeHtml(b.workingDirectory || '~')}`);
+        const currentBinding = store.getChannelBinding(
+          adapter.channelType,
+          msg.address.chatId,
+        );
+
+        for (const item of items.slice(0, 15)) {
+          const typeLabel = item.type === 'bridge' ? '[Bridge]' : '[CLI]';
+          const activeLabel = item.isActive ? 'active' : 'inactive';
+          const idShort = item.id.slice(0, 8);
+
+          // Check if this is the current session
+          const isCurrent = currentBinding && (
+            currentBinding.codepilotSessionId === item.id ||
+            currentBinding.sdkSessionId === item.id
+          );
+          const currentMarker = isCurrent ? ' <b>← current</b>' : '';
+
+          lines.push(
+            `${typeLabel} <code>${idShort}...</code> [${activeLabel}] ` +
+            `${escapeHtml(item.cwd || '~')}${currentMarker}`
+          );
+
+          // Show resume ID for CLI sessions
+          if (item.sdkSessionId && item.type === 'cli') {
+            lines.push(`  Resume: <code>${item.sdkSessionId.slice(0, 12)}...</code>`);
+          }
         }
+
+        // Add usage instructions
+        lines.push('');
+        lines.push('Use <code>/bind &lt;session_id&gt;</code> to switch.');
+        lines.push('CLI sessions: use the full ID for <code>claude --resume</code>.');
+
         response = lines.join('\n');
       }
       break;
