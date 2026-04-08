@@ -110,7 +110,7 @@ export function bindToSession(
       }
 
       // Create binding with sdkSessionId
-      return store.upsertChannelBinding({
+      const binding = store.upsertChannelBinding({
         channelType: address.channelType,
         chatId: address.chatId,
         codepilotSessionId: newSession.id,
@@ -119,10 +119,49 @@ export function bindToSession(
         model: '',
         mode: 'code',
       } as any);
+
+      // Mark session as taken over (for state file and TTY notification)
+      if (binding && jsonStore.markSessionTakenOver) {
+        jsonStore.markSessionTakenOver(
+          cliSession.sessionId,
+          address.channelType,
+          address.chatId,
+          address.displayName,
+        );
+      }
+
+      return binding;
     }
   }
 
-  // 3. Neither found
+  // 3. Check if it's an existing Bridge binding by sdkSessionId
+  // This handles the case where user wants to rebind to a previously imported session
+  const allBindings = store.listChannelBindings(address.channelType);
+  const existingBySdkId = allBindings.find(b => b.sdkSessionId === sessionId);
+  if (existingBySdkId) {
+    const result = store.upsertChannelBinding({
+      channelType: address.channelType,
+      chatId: address.chatId,
+      codepilotSessionId: existingBySdkId.codepilotSessionId,
+      sdkSessionId: existingBySdkId.sdkSessionId,
+      workingDirectory: existingBySdkId.workingDirectory,
+      model: existingBySdkId.model,
+    } as any);
+
+    // Mark as taken over
+    if (result && jsonStore.markSessionTakenOver && existingBySdkId.sdkSessionId) {
+      jsonStore.markSessionTakenOver(
+        existingBySdkId.sdkSessionId,
+        address.channelType,
+        address.chatId,
+        address.displayName,
+      );
+    }
+
+    return result;
+  }
+
+  // 4. Neither found
   return null;
 }
 
