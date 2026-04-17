@@ -186,11 +186,15 @@ const CHINESE_COMMAND_MAP: Record<string, { command: string; needsArgs?: boolean
   '取消': { command: '/stop' },
   'stop': { command: '/stop' },
 
-  // 终止 CLI 进程
+  // 终止当前绑定的 CLI 进程
   '终止': { command: '/terminate' },
   '结束': { command: '/terminate' },
   '杀掉': { command: '/terminate' },
   'terminate': { command: '/terminate' },
+
+  // 按序号终止指定 session
+  '关闭': { command: '/kill', needsArgs: true, argHint: '#N' },
+  'kill': { command: '/kill', needsArgs: true, argHint: '#N' },
 
   // 切换 agent
   '用 claude': { command: '/agent', needsArgs: false },
@@ -1310,70 +1314,82 @@ async function handleCommand(
       // Use shared function to build unified session list
       const items = buildUnifiedSessionList(adapter.channelType);
 
-      // Format output - Beautified version
       if (items.length === 0) {
         response = '📋 Sessions\n────────────────────────────\n暂无会话';
       } else {
         const lines: string[] = [];
         lines.push('📋 <b>Sessions</b>');
-        lines.push('────────────────────────────');
 
         const currentBinding = store.getChannelBinding(
           adapter.channelType,
           msg.address.chatId,
         );
 
-        // Find current session index
-        // 只检查 codepilotSessionId，不检查 sdkSessionId
-        let currentIndex = -1;
-        for (let i = 0; i < items.length; i++) {
-          const item = items[i];
-          let isCurrent = false;
-          if (currentBinding) {
-            isCurrent = currentBinding.codepilotSessionId === item.id;
-          }
-          if (isCurrent) {
-            currentIndex = i;
-            break;
+        const displayedItems = items.slice(0, MAX_SESSIONS_TO_DISPLAY);
+
+        // Split into Claude and Codex groups, keeping their global index
+        const claudeItems: Array<{ item: UnifiedSessionItem; globalIdx: number }> = [];
+        const codexItems: Array<{ item: UnifiedSessionItem; globalIdx: number }> = [];
+        for (let i = 0; i < displayedItems.length; i++) {
+          const item = displayedItems[i];
+          if (item.agent === 'codex') {
+            codexItems.push({ item, globalIdx: i + 1 });
+          } else {
+            claudeItems.push({ item, globalIdx: i + 1 });
           }
         }
 
-        // Display each session
-        const displayedItems = items.slice(0, MAX_SESSIONS_TO_DISPLAY);
-        for (let i = 0; i < displayedItems.length; i++) {
-          const item = displayedItems[i];
-          const displayIndex = i + 1;
-          const shortName = getShortPathName(item.cwd);
-          const agentLabel = item.agent === 'codex' ? 'Codex' : 'Claude';
-          const typeLabel = item.type === 'bridge' ? 'Bridge' : 'CLI';
-          const idShort = item.id.slice(0, 8);
+        const renderGroup = (
+          groupItems: Array<{ item: UnifiedSessionItem; globalIdx: number }>,
+        ): void => {
+          for (const { item, globalIdx } of groupItems) {
+            const shortName = getShortPathName(item.cwd);
+            const idShort = item.id.slice(0, 8);
 
-          // Check if current
-          // 只检查 codepilotSessionId，不检查 sdkSessionId
-          // 当 CLI session 被绑定到 Bridge 后，只有 Bridge session 应该被标记为"当前"
-          let isCurrent = false;
-          if (currentBinding) {
-            isCurrent = currentBinding.codepilotSessionId === item.id;
+            const isCurrent = !!(currentBinding && currentBinding.codepilotSessionId === item.id);
+            const dot = isCurrent ? '●' : '○';
+            const currentMarker = isCurrent ? ' <b>← 当前</b>' : '';
+
+            // Type tag: [Bridge] / [CLI ▸ 活跃] / [历史]
+            let typeTag: string;
+            if (item.type === 'bridge') {
+              typeTag = '[Bridge]';
+            } else if (item.isActive) {
+              typeTag = '[CLI ▸ 活跃]';
+            } else {
+              typeTag = '[历史]';
+            }
+
+            lines.push(`#${globalIdx} ${dot} ${shortName}${currentMarker}`);
+            lines.push(`├─ 📁 <code>${escapeHtml(item.cwd || '~')}</code>`);
+            lines.push(`└─ 🆔 <code>${idShort}...</code> ${typeTag}`);
           }
+        };
 
-          // Status indicator: ● for current, ○ for others
-          const statusIndicator = isCurrent ? '●' : '○';
-          const currentMarker = isCurrent ? ' <b>← 当前</b>' : '';
+        // ── Claude section ──
+        lines.push('────────────────────────────');
+        lines.push(`🤖 <b>Claude</b> (${claudeItems.length})`);
+        if (claudeItems.length === 0) {
+          lines.push('  暂无');
+        } else {
+          renderGroup(claudeItems);
+        }
 
-          // First line: #N ● Claude/Codex  shortName ← 当前
-          lines.push(`#${displayIndex} ${statusIndicator} ${agentLabel}  ${shortName}${currentMarker}`);
-
-          // Tree structure
-          lines.push(`├─ 📁 <code>${escapeHtml(item.cwd || '~')}</code>`);
-          lines.push(`└─ 🆔 <code>${idShort}...</code>`);
+        // ── Codex section ──
+        lines.push('────────────────────────────');
+        lines.push(`💻 <b>Codex</b> (${codexItems.length})`);
+        if (codexItems.length === 0) {
+          lines.push('  暂无');
+        } else {
+          renderGroup(codexItems);
         }
 
         // Footer
         lines.push('────────────────────────────');
         lines.push('💡 <b>操作:</b>');
-        lines.push('• 切换会话: <code>/switch #N</code> (例如: <code>/switch #1</code>)');
-        lines.push('• 切换 agent: <code>/agent claude</code> 或 <code>/agent codex</code>');
-        lines.push('• 终端恢复: <code>/bind #N</code> (显示完整 resume ID)');
+        lines.push('• <code>/switch #N</code> - 切换会话');
+        lines.push('• <code>/kill #N</code>   - 终止 Claude 进程 (CLI ▸ 活跃)');
+        lines.push('• <code>/agent claude|codex</code> - 切换 Agent');
 
         response = lines.join('\n');
       }
@@ -1521,6 +1537,92 @@ async function handleCommand(
       break;
     }
 
+    case '/kill': {
+      // /kill #N — terminate a specific session by index shown in /sessions
+      const { store } = getBridgeContext();
+
+      if (!args) {
+        response = [
+          '用法: <code>/kill #N</code> (例如: <code>/kill #2</code>)',
+          '',
+          '只能终止标记为 <b>[CLI ▸ 活跃]</b> 的 Claude 进程。',
+          '先用 <code>/sessions</code> 查看序号。',
+        ].join('\n');
+        break;
+      }
+
+      const killMatch = args.match(/#?\s*(\d+)/);
+      if (!killMatch) {
+        response = '无效的序号格式，请使用 <code>/kill #N</code>（例如 <code>/kill #2</code>）';
+        break;
+      }
+
+      const killIndex = parseInt(killMatch[1], 10);
+      const killItems = buildUnifiedSessionList(adapter.channelType);
+
+      if (killIndex < 1 || killIndex > killItems.length) {
+        response = `序号 #${killIndex} 超出范围，当前共 ${killItems.length} 个会话。`;
+        break;
+      }
+
+      const killTarget = killItems[killIndex - 1];
+      const killShort = getShortPathName(killTarget.cwd);
+
+      if (killTarget.agent === 'codex') {
+        // Codex threads are cloud-side; no OS process to kill
+        response = [
+          `<b>⚠️ 无法终止 Codex 会话 #${killIndex}</b>`,
+          '',
+          'Codex 线程运行在云端，无本地进程可以终止。',
+          '如需结束会话请在终端手动操作，或直接开启新会话。',
+        ].join('\n');
+        break;
+      }
+
+      if (killTarget.type === 'bridge') {
+        // Bridge binding only — no linked CLI process
+        response = [
+          `<b>⚠️ 会话 #${killIndex} 无关联终端进程</b>`,
+          '',
+          '该会话是纯 Bridge 会话（无对应 CLI 进程），无法终止。',
+          '如需停止正在执行的任务请使用 <code>/stop</code>。',
+        ].join('\n');
+        break;
+      }
+
+      // Claude CLI session
+      if (!killTarget.isActive) {
+        response = `会话 #${killIndex}（${killShort}）已停止运行，无需终止。`;
+        break;
+      }
+
+      if (!store.terminateCliSession) {
+        response = '当前配置不支持终止 CLI 进程。';
+        break;
+      }
+
+      const killResult = store.terminateCliSession(killTarget.sdkSessionId);
+      if (killResult.success) {
+        response = [
+          `<b>✅ 已终止会话 #${killIndex}</b>`,
+          '',
+          `目录: <code>${escapeHtml(killTarget.cwd || '~')}</code>`,
+          `ID: <code>${killTarget.sdkSessionId.slice(0, 8)}...</code>`,
+          `原因: ${killResult.reason}`,
+        ].join('\n');
+      } else {
+        response = [
+          `<b>❌ 终止失败</b>`,
+          '',
+          `会话 #${killIndex}（${killShort}）`,
+          `错误: ${killResult.reason}`,
+          '',
+          '请在终端手动关闭该进程。',
+        ].join('\n');
+      }
+      break;
+    }
+
     case '/perm': {
       // Text-based permission approval fallback (for channels without inline buttons)
       // Usage: /perm allow <id> | /perm allow_session <id> | /perm deny <id>
@@ -1549,7 +1651,8 @@ async function handleCommand(
         '/new [path] - Start new session (新会话, 新开, 新建)',
         '/bind &lt;session_id&gt; - Bind to existing session (绑定, 切换, 接管)',
         '/sessions - List recent sessions (会话列表, 会话)',
-        '/terminate - Terminate linked CLI process (终止, 结束, 杀掉)',
+        '/kill #N - Terminate a specific CLI session (关闭 #N)',
+        '/terminate - Terminate current linked CLI process (终止, 结束, 杀掉)',
         '',
         '<b>设置：</b>',
         '/agent claude|codex - Switch AI agent (用 claude, 用 codex)',
