@@ -93,10 +93,13 @@ function buildUnifiedSessionList(
     if (b.codexSessionId) bridgeLinkedIds.add(b.codexSessionId);
   }
 
+  const claudeItems: UnifiedSessionItem[] = [];
+  const codexItems: UnifiedSessionItem[] = [];
+
   for (const b of bindings) {
     const session = store.getSession(b.codepilotSessionId);
     const sessionWithTs = session as BridgeSessionWithTimestamps | null;
-    items.push({
+    const item: UnifiedSessionItem = {
       type: 'bridge',
       agent: b.agent || 'claude',
       id: b.codepilotSessionId,
@@ -106,23 +109,23 @@ function buildUnifiedSessionList(
       startedAt: sessionWithTs?.created_at
         ? new Date(sessionWithTs.created_at).getTime()
         : new Date(b.createdAt || 0).getTime(),
-    });
+    };
+    if (item.agent === 'codex') codexItems.push(item);
+    else claudeItems.push(item);
   }
 
   // ── CLI sessions (supplemental, deduped) ────────────────────────
   // Rules:
-  //  • Skip if the session is already covered by a bridge binding
-  //    (matched via sdkSessionId / codexSessionId) — avoids duplicates.
+  //  • Skip if already covered by a bridge binding (avoids duplicate rows).
   //  • Claude sessions: only include if the process is still running
   //    (isPidAlive). Dead PID files clutter the list after Ctrl+D.
-  //  • Codex threads: include recent history even if "inactive" — the
-  //    user may want to resume a thread that finished normally.
+  //  • Codex threads: include recent history even if "inactive" — threads
+  //    are cloud-side and can always be resumed.
   for (const c of cliSessions) {
     if (bridgeLinkedIds.has(c.sessionId)) continue;
-
     if (c.agent === 'claude' && !c.isActive) continue;
 
-    items.push({
+    const item: UnifiedSessionItem = {
       type: 'cli',
       agent: c.agent,
       id: c.sessionId,
@@ -130,13 +133,21 @@ function buildUnifiedSessionList(
       cwd: c.cwd,
       isActive: c.isActive,
       startedAt: c.startedAt,
-    });
+    };
+    if (item.agent === 'codex') codexItems.push(item);
+    else claudeItems.push(item);
   }
 
-  // Newest first
-  items.sort((a, b) => b.startedAt - a.startedAt);
+  // Sort each group newest-first independently, then concatenate.
+  // This gives consecutive global indexes within each section:
+  //   Claude:  #1, #2, #3
+  //   Codex:   #4, #5, #6
+  const byTime = (a: UnifiedSessionItem, b: UnifiedSessionItem): number =>
+    b.startedAt - a.startedAt;
+  claudeItems.sort(byTime);
+  codexItems.sort(byTime);
 
-  return items;
+  return [...claudeItems, ...codexItems];
 }
 
 /**
@@ -1144,6 +1155,7 @@ async function handleCommand(
 
   let response = '';
 
+  try {
   switch (command) {
     case '/start':
       response = [
@@ -1691,6 +1703,11 @@ async function handleCommand(
 
     default:
       response = `Unknown command: ${escapeHtml(command)}\nType /help for available commands.`;
+  }
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error(`[bridge-manager] Command "${command}" threw:`, err);
+    response = `<b>⚠️ 命令执行出错</b>\n\n<code>${escapeHtml(errMsg)}</code>`;
   }
 
   if (response) {

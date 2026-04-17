@@ -89,45 +89,59 @@ export function bindToSession(
     } as any);
   }
 
-  // 2. Second try: check if it's a CLI session (sdkSessionId)
-  // Try exact match first, then prefix match
+  // 2. Second try: check if it's a CLI session (Claude sdkSessionId or Codex threadId)
   if (jsonStore.getCliSession) {
     const cliSession = jsonStore.getCliSession(sessionId);
     if (cliSession) {
-      // It's a CLI session - create a new BridgeSession and bind it
-      const displayName = address.displayName || address.chatId;
+      const isCodex = cliSession.agent === 'codex';
+
+      // Create a new BridgeSession for this CLI session
       const newSession = store.createSession(
         `CLI Import: ${cliSession.sessionId.slice(0, 8)}`,
-        '',  // Use default model
-        undefined,  // systemPrompt
-        cliSession.cwd,  // Inherit CLI's working directory
-        'code',  // mode
+        '',        // default model
+        undefined, // systemPrompt
+        cliSession.cwd,
+        'code',
       );
 
-      // Set sdk_session_id on the session and all bindings
-      if (jsonStore.updateSdkSessionId) {
-        jsonStore.updateSdkSessionId(newSession.id, cliSession.sessionId);
-      }
-
-      // Create binding with sdkSessionId
-      const binding = store.upsertChannelBinding({
-        channelType: address.channelType,
-        chatId: address.chatId,
-        codepilotSessionId: newSession.id,
-        sdkSessionId: cliSession.sessionId,
-        workingDirectory: cliSession.cwd,
-        model: '',
-        mode: 'code',
-      } as any);
-
-      // Mark session as taken over (for state file and TTY notification)
-      if (binding && jsonStore.markSessionTakenOver) {
-        jsonStore.markSessionTakenOver(
-          cliSession.sessionId,
-          address.channelType,
-          address.chatId,
-          address.displayName,
-        );
+      let binding;
+      if (isCodex) {
+        // Codex thread: store the thread ID as codexSessionId, not sdkSessionId
+        binding = store.upsertChannelBinding({
+          channelType: address.channelType,
+          chatId: address.chatId,
+          codepilotSessionId: newSession.id,
+          sdkSessionId: '',
+          codexSessionId: cliSession.sessionId,
+          workingDirectory: cliSession.cwd,
+          model: '',
+          mode: 'code',
+          agent: 'codex',
+        } as any);
+        // Codex threads have no OS takeover file — skip markSessionTakenOver
+      } else {
+        // Claude CLI: keep existing behaviour
+        if (jsonStore.updateSdkSessionId) {
+          jsonStore.updateSdkSessionId(newSession.id, cliSession.sessionId);
+        }
+        binding = store.upsertChannelBinding({
+          channelType: address.channelType,
+          chatId: address.chatId,
+          codepilotSessionId: newSession.id,
+          sdkSessionId: cliSession.sessionId,
+          workingDirectory: cliSession.cwd,
+          model: '',
+          mode: 'code',
+          agent: 'claude',
+        } as any);
+        if (binding && jsonStore.markSessionTakenOver) {
+          jsonStore.markSessionTakenOver(
+            cliSession.sessionId,
+            address.channelType,
+            address.chatId,
+            address.displayName,
+          );
+        }
       }
 
       return binding;
