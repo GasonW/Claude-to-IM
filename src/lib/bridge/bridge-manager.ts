@@ -77,17 +77,23 @@ function buildUnifiedSessionList(
 ): UnifiedSessionItem[] {
   const { store } = getBridgeContext();
 
-  // 1. Get Bridge bindings
+  // 1. Get Bridge bindings for this channel
   const bindings = router.listBindings(channelType);
 
-  // 2. Get CLI sessions (if store supports it)
+  // 2. Get CLI sessions (Claude active + Codex recent history)
   const cliSessions = store.listCliSessions ? store.listCliSessions() : [];
 
   const items: UnifiedSessionItem[] = [];
 
-  // Add Bridge bindings
+  // ── Bridge bindings (always shown) ──────────────────────────────
+  // Collect the SDK/thread IDs they reference so we can deduplicate CLI entries.
+  const bridgeLinkedIds = new Set<string>();
   for (const b of bindings) {
-    // Get startedAt from BridgeSession if available
+    if (b.sdkSessionId) bridgeLinkedIds.add(b.sdkSessionId);
+    if (b.codexSessionId) bridgeLinkedIds.add(b.codexSessionId);
+  }
+
+  for (const b of bindings) {
     const session = store.getSession(b.codepilotSessionId);
     const sessionWithTs = session as BridgeSessionWithTimestamps | null;
     items.push({
@@ -103,8 +109,19 @@ function buildUnifiedSessionList(
     });
   }
 
-  // Add CLI sessions
+  // ── CLI sessions (supplemental, deduped) ────────────────────────
+  // Rules:
+  //  • Skip if the session is already covered by a bridge binding
+  //    (matched via sdkSessionId / codexSessionId) — avoids duplicates.
+  //  • Claude sessions: only include if the process is still running
+  //    (isPidAlive). Dead PID files clutter the list after Ctrl+D.
+  //  • Codex threads: include recent history even if "inactive" — the
+  //    user may want to resume a thread that finished normally.
   for (const c of cliSessions) {
+    if (bridgeLinkedIds.has(c.sessionId)) continue;
+
+    if (c.agent === 'claude' && !c.isActive) continue;
+
     items.push({
       type: 'cli',
       agent: c.agent,
@@ -116,7 +133,7 @@ function buildUnifiedSessionList(
     });
   }
 
-  // Sort by startedAt descending (newest first)
+  // Newest first
   items.sort((a, b) => b.startedAt - a.startedAt);
 
   return items;
