@@ -66,7 +66,7 @@ export interface BridgeApiProvider {
 // ── Session & Message types ──────────────────────────────────
 
 /**
- * CLI Session from ~/.claude/sessions/{pid}.json
+ * CLI Session from ~/.claude/sessions/{pid}.json or ~/.codex/sessions/
  * Used for bridging terminal sessions to IM channels.
  */
 export interface CliSession {
@@ -84,6 +84,8 @@ export interface CliSession {
   entrypoint: string;
   /** Whether the process is still running */
   isActive: boolean;
+  /** Which AI agent CLI tool owns this session */
+  agent: 'claude' | 'codex';
 }
 
 /** Extended BridgeSession with optional created_at field. */
@@ -158,9 +160,13 @@ export interface UpsertChannelBindingInput {
   chatId: string;
   codepilotSessionId: string;
   sdkSessionId?: string;
+  /** Codex CLI conversation session ID for resume */
+  codexSessionId?: string;
   workingDirectory: string;
   model: string;
   mode?: string;
+  /** Active AI agent runtime for this binding */
+  agent?: 'claude' | 'codex';
 }
 
 /**
@@ -250,6 +256,8 @@ export interface StreamChatParams {
   prompt: string;
   sessionId: string;
   sdkSessionId?: string;
+  /** Codex CLI conversation session ID for resume */
+  codexSessionId?: string;
   model?: string;
   systemPrompt?: string;
   workingDirectory?: string;
@@ -259,6 +267,8 @@ export interface StreamChatParams {
   conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
   files?: FileAttachment[];
   onRuntimeStatusChange?: (status: string) => void;
+  /** Which AI agent runtime to use for this request */
+  agent?: 'claude' | 'codex';
 }
 
 export interface LLMProvider {

@@ -90,6 +90,9 @@ export interface SendResult {
 
 // ── Bindings ───────────────────────────────────────────────────
 
+/** AI agent runtime selector */
+export type AgentRuntime = 'claude' | 'codex';
+
 /** Links an IM chat to a CodePilot session */
 export interface ChannelBinding {
   id: string;
@@ -97,14 +100,18 @@ export interface ChannelBinding {
   chatId: string;
   /** CodePilot session ID this chat is bound to */
   codepilotSessionId: string;
-  /** SDK session ID for resume (cached from last conversation) */
+  /** Claude Code SDK session ID for --resume (cached from last conversation) */
   sdkSessionId: string;
+  /** Codex CLI conversation session ID for resume */
+  codexSessionId?: string;
   /** Working directory for this binding */
   workingDirectory: string;
   /** Model override for this binding */
   model: string;
   /** Chat mode */
   mode: 'code' | 'plan' | 'ask';
+  /** Active AI agent runtime for this binding */
+  agent?: AgentRuntime;
   /** Whether this binding is currently active */
   active: boolean;
   createdAt: string;

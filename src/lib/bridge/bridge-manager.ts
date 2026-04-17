@@ -15,6 +15,7 @@ import type {
   ToolCallInfo,
   CliSession,
   BridgeSessionWithTimestamps,
+  AgentRuntime,
 } from './types.js';
 import { createAdapter, getRegisteredTypes } from './channel-adapter.js';
 import type { BaseChannelAdapter } from './channel-adapter.js';
@@ -51,6 +52,8 @@ const DEFAULT_USER_NAME = process.env.USER || process.env.USERNAME || 'user';
 /** Unified session item for /sessions and /switch commands */
 interface UnifiedSessionItem {
   type: 'bridge' | 'cli';
+  /** Which AI agent this session belongs to */
+  agent: AgentRuntime;
   /** ID used for /bind or /switch */
   id: string;
   /** SDK session ID for claude --resume */
@@ -89,6 +92,7 @@ function buildUnifiedSessionList(
     const sessionWithTs = session as BridgeSessionWithTimestamps | null;
     items.push({
       type: 'bridge',
+      agent: b.agent || 'claude',
       id: b.codepilotSessionId,
       sdkSessionId: b.sdkSessionId,
       cwd: b.workingDirectory,
@@ -103,6 +107,7 @@ function buildUnifiedSessionList(
   for (const c of cliSessions) {
     items.push({
       type: 'cli',
+      agent: c.agent,
       id: c.sessionId,
       sdkSessionId: c.sessionId,
       cwd: c.cwd,
@@ -186,6 +191,15 @@ const CHINESE_COMMAND_MAP: Record<string, { command: string; needsArgs?: boolean
   '结束': { command: '/terminate' },
   '杀掉': { command: '/terminate' },
   'terminate': { command: '/terminate' },
+
+  // 切换 agent
+  '用 claude': { command: '/agent', needsArgs: false },
+  '用claude': { command: '/agent', needsArgs: false },
+  '用 codex': { command: '/agent', needsArgs: false },
+  '用codex': { command: '/agent', needsArgs: false },
+  '切换agent': { command: '/agent', needsArgs: true, argHint: 'claude|codex' },
+  '切换 agent': { command: '/agent', needsArgs: true, argHint: 'claude|codex' },
+  'agent': { command: '/agent', needsArgs: true, argHint: 'claude|codex' },
 };
 
 /**
@@ -233,7 +247,7 @@ function parseChineseCommand(text: string): { command: string; args: string } | 
   }
 
   // 尝试模糊匹配（处理口语化表达）
-  const fuzzyPatterns: { pattern: RegExp; command: string; isMode?: boolean }[] = [
+  const fuzzyPatterns: { pattern: RegExp; command: string; isMode?: boolean; isAgent?: boolean }[] = [
     // 切换/绑定相关
     { pattern: /^(?:帮我\s*)?(?:切换|绑定|接管)(?:到|会话)?\s*([a-f0-9\-]+)\s*(?:会话)?$/i, command: '/bind' },
     { pattern: /^(?:帮我\s*)?切换到\s*(\S+)\s*会话$/i, command: '/bind' },
@@ -245,6 +259,11 @@ function parseChineseCommand(text: string): { command: string; args: string } | 
     // 模式相关
     { pattern: /^切换?(?:到)?\s*(计划|规划|代码|编码|询问|问答)(?:模式)?$/i, command: '/mode', isMode: true },
     { pattern: /^进入\s*(计划|规划|代码|编码|询问|问答)(?:模式)?$/i, command: '/mode', isMode: true },
+
+    // agent 相关（口语化）
+    { pattern: /^用\s*(claude|codex)$/i, command: '/agent', isAgent: true },
+    { pattern: /^切换(?:到)?\s*(claude|codex)$/i, command: '/agent', isAgent: true },
+    { pattern: /^换(?:成|用)\s*(claude|codex)$/i, command: '/agent', isAgent: true },
   ];
 
   for (const fp of fuzzyPatterns) {
@@ -258,6 +277,11 @@ function parseChineseCommand(text: string): { command: string; args: string } | 
         if (modeMatch) {
           args = modeMatch;
         }
+      }
+
+      // agent 名称统一小写
+      if (fp.isAgent && args) {
+        args = args.toLowerCase();
       }
 
       return { command: fp.command, args };
@@ -1011,14 +1035,19 @@ async function handleMessage(
       await deliver(adapter, errorResponse);
     }
 
-    // Persist the actual SDK session ID for future resume.
-    // If the result has an error and no session ID was captured, clear the
-    // stale ID so the next message starts fresh instead of retrying a broken resume.
+    // Persist session IDs for future resume.
+    // Claude: sdkSessionId; Codex: codexSessionId.
+    // On error, clear the relevant ID so the next message starts fresh.
     if (binding.id) {
       try {
-        const update = computeSdkSessionUpdate(result.sdkSessionId, result.hasError);
-        if (update !== null) {
-          store.updateChannelBinding(binding.id, { sdkSessionId: update });
+        const claudeUpdate = computeSdkSessionUpdate(result.sdkSessionId, result.hasError);
+        if (claudeUpdate !== null) {
+          store.updateChannelBinding(binding.id, { sdkSessionId: claudeUpdate });
+        }
+        if (result.codexSessionId && !result.hasError) {
+          store.updateChannelBinding(binding.id, { codexSessionId: result.codexSessionId });
+        } else if (result.hasError && binding.agent === 'codex') {
+          store.updateChannelBinding(binding.id, { codexSessionId: '' });
         }
       } catch { /* best effort */ }
     }
@@ -1099,7 +1128,7 @@ async function handleCommand(
       response = [
         '<b>CodePilot Bridge</b>',
         '',
-        'Send any message to interact with Claude.',
+        'Send any message to interact with Claude or Codex.',
         '',
         '<b>命令（支持中文关键词）：</b>',
         '',
@@ -1110,6 +1139,7 @@ async function handleCommand(
         '/terminate, 终止, 结束, 杀掉 - 终止关联的 CLI 进程',
         '',
         '<b>设置：</b>',
+        '/agent claude|codex, 用 claude, 用 codex - 切换 AI 工具',
         '/cwd /path, 目录 /path - 更改工作目录',
         '/mode plan|code|ask, 模式 计划|代码|询问 - 切换模式',
         '',
@@ -1124,6 +1154,7 @@ async function handleCommand(
         '<b>示例：</b>',
         '"会话列表" → 查看所有会话',
         '"切换 abc123" → 绑定到会话 abc123',
+        '"用 codex" → 切换到 Codex',
         '"模式 计划" → 切换到计划模式',
       ].join('\n');
       break;
@@ -1227,16 +1258,49 @@ async function handleCommand(
       break;
     }
 
+    case '/agent': {
+      const agentArg = args.toLowerCase();
+      if (agentArg !== 'claude' && agentArg !== 'codex') {
+        response = [
+          'Usage: /agent claude|codex',
+          '',
+          '• <code>/agent claude</code> — 切换到 Claude Code',
+          '• <code>/agent codex</code> — 切换到 Codex',
+          '',
+          '中文快捷: "用 claude"、"用 codex"',
+        ].join('\n');
+        break;
+      }
+      const agentBinding = router.resolve(msg.address);
+      router.updateBinding(agentBinding.id, { agent: agentArg as AgentRuntime });
+      const agentName = agentArg === 'codex' ? 'Codex' : 'Claude Code';
+      const resumeHint = agentArg === 'codex'
+        ? (agentBinding.codexSessionId ? `\n💡 上次 Codex 会话: <code>${agentBinding.codexSessionId.slice(0, 12)}...</code>` : '\n💡 将开始新的 Codex 会话')
+        : (agentBinding.sdkSessionId ? `\n💡 继续 Claude 会话: <code>claude --resume ${agentBinding.sdkSessionId}</code>` : '\n💡 将开始新的 Claude 会话');
+      response = `已切换到 <b>${agentName}</b>${resumeHint}`;
+      break;
+    }
+
     case '/status': {
       const binding = router.resolve(msg.address);
-      response = [
+      const currentAgent = binding.agent || 'claude';
+      const agentName = currentAgent === 'codex' ? 'Codex' : 'Claude Code';
+      const sessionIdLine = currentAgent === 'codex' && binding.codexSessionId
+        ? `Codex Session: <code>${binding.codexSessionId.slice(0, 12)}...</code>`
+        : binding.sdkSessionId
+          ? `Claude Session: <code>${binding.sdkSessionId.slice(0, 12)}...</code>`
+          : null;
+      const lines = [
         '<b>Bridge Status</b>',
         '',
-        `Session: <code>${binding.codepilotSessionId.slice(0, 8)}...</code>`,
+        `Agent: <b>${agentName}</b>`,
+        `Bridge Session: <code>${binding.codepilotSessionId.slice(0, 8)}...</code>`,
         `CWD: <code>${escapeHtml(binding.workingDirectory || '~')}</code>`,
         `Mode: <b>${binding.mode}</b>`,
         `Model: <code>${binding.model || 'default'}</code>`,
-      ].join('\n');
+      ];
+      if (sessionIdLine) lines.push(sessionIdLine);
+      response = lines.join('\n');
       break;
     }
 
@@ -1280,6 +1344,7 @@ async function handleCommand(
           const item = displayedItems[i];
           const displayIndex = i + 1;
           const shortName = getShortPathName(item.cwd);
+          const agentLabel = item.agent === 'codex' ? 'Codex' : 'Claude';
           const typeLabel = item.type === 'bridge' ? 'Bridge' : 'CLI';
           const idShort = item.id.slice(0, 8);
 
@@ -1295,8 +1360,8 @@ async function handleCommand(
           const statusIndicator = isCurrent ? '●' : '○';
           const currentMarker = isCurrent ? ' <b>← 当前</b>' : '';
 
-          // First line: #N ● CLI  shortName ← 当前
-          lines.push(`#${displayIndex} ${statusIndicator} ${typeLabel}  ${shortName}${currentMarker}`);
+          // First line: #N ● Claude/Codex  shortName ← 当前
+          lines.push(`#${displayIndex} ${statusIndicator} ${agentLabel}  ${shortName}${currentMarker}`);
 
           // Tree structure
           lines.push(`├─ 📁 <code>${escapeHtml(item.cwd || '~')}</code>`);
@@ -1307,6 +1372,7 @@ async function handleCommand(
         lines.push('────────────────────────────');
         lines.push('💡 <b>操作:</b>');
         lines.push('• 切换会话: <code>/switch #N</code> (例如: <code>/switch #1</code>)');
+        lines.push('• 切换 agent: <code>/agent claude</code> 或 <code>/agent codex</code>');
         lines.push('• 终端恢复: <code>/bind #N</code> (显示完整 resume ID)');
 
         response = lines.join('\n');
@@ -1347,21 +1413,28 @@ async function handleCommand(
       const targetItem = items[index - 1];
 
       // Check if it's an active CLI session (for warning)
-      let isActiveCliSession = targetItem.type === 'cli' && targetItem.isActive;
+      const isActiveCliSession = targetItem.type === 'cli' && targetItem.isActive;
 
       // Bind to this session
       const binding = router.bindToSession(msg.address, targetItem.id);
 
       if (binding) {
+        // Sync the agent from the target session to the binding
+        router.updateBinding(binding.id, { agent: targetItem.agent });
+
         const lines = [];
         lines.push(`<b>✅ 已切换到会话 #${index}</b>`);
         lines.push('');
-        lines.push(`类型: ${targetItem.type === 'bridge' ? 'Bridge' : 'CLI'}`);
+        lines.push(`Agent: <b>${targetItem.agent === 'codex' ? 'Codex' : 'Claude'}</b>`);
         lines.push(`工作目录: <code>${escapeHtml(binding.workingDirectory || '~')}</code>`);
         lines.push(`会话ID: <code>${targetItem.id.slice(0, 8)}...</code>`);
 
-        // Show sdkSessionId for terminal resume
-        if (binding.sdkSessionId) {
+        // Show resume command for terminal
+        if (targetItem.agent === 'codex' && binding.codexSessionId) {
+          lines.push('');
+          lines.push('💡 终端恢复命令:');
+          lines.push(`<code>codex --resume ${binding.codexSessionId}</code>`);
+        } else if (binding.sdkSessionId) {
           lines.push('');
           lines.push('💡 终端恢复命令:');
           lines.push(`<code>claude --resume ${binding.sdkSessionId}</code>`);
@@ -1479,6 +1552,7 @@ async function handleCommand(
         '/terminate - Terminate linked CLI process (终止, 结束, 杀掉)',
         '',
         '<b>设置：</b>',
+        '/agent claude|codex - Switch AI agent (用 claude, 用 codex)',
         '/cwd /path - Change working directory (目录, 工作目录)',
         '/mode plan|code|ask - Change mode (模式, 切换模式)',
         '',
@@ -1491,7 +1565,7 @@ async function handleCommand(
         '',
         '<b>提示：</b>',
         '所有命令都支持中文关键词，无需输入斜杠。',
-        '例如：输入 "会话列表" 等同于 /sessions',
+        '例如：输入 "用 codex" 等同于 /agent codex',
       ].join('\n');
       break;
 

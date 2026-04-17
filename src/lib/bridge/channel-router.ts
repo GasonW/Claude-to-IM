@@ -170,7 +170,7 @@ export function bindToSession(
  */
 export function updateBinding(
   id: string,
-  updates: Partial<Pick<ChannelBinding, 'sdkSessionId' | 'workingDirectory' | 'model' | 'mode' | 'active'>>,
+  updates: Partial<Pick<ChannelBinding, 'sdkSessionId' | 'codexSessionId' | 'workingDirectory' | 'model' | 'mode' | 'active' | 'agent'>>,
 ): void {
   getBridgeContext().store.updateChannelBinding(id, updates);
 }

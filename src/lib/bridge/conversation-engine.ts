@@ -52,8 +52,10 @@ export interface ConversationResult {
   errorMessage: string;
   /** Permission request events that were forwarded during streaming */
   permissionRequests: PermissionRequestInfo[];
-  /** SDK session ID captured from status/result events, for session resume */
+  /** Claude Code SDK session ID captured from status/result events, for session resume */
   sdkSessionId: string | null;
+  /** Codex CLI conversation session ID captured from status/result events, for session resume */
+  codexSessionId: string | null;
 }
 
 /**
@@ -83,6 +85,7 @@ export async function processMessage(
       errorMessage: 'Session is busy processing another request',
       permissionRequests: [],
       sdkSessionId: null,
+      codexSessionId: null,
     };
   }
 
@@ -168,6 +171,7 @@ export async function processMessage(
       prompt: text,
       sessionId,
       sdkSessionId: binding.sdkSessionId || undefined,
+      codexSessionId: binding.codexSessionId || undefined,
       model: effectiveModel,
       systemPrompt: session?.system_prompt || undefined,
       workingDirectory: binding.workingDirectory || session?.working_directory || undefined,
@@ -179,6 +183,7 @@ export async function processMessage(
       onRuntimeStatusChange: (status: string) => {
         try { store.setSessionRuntimeStatus(sessionId, status); } catch { /* best effort */ }
       },
+      agent: binding.agent || undefined,
     });
 
     // Consume the stream server-side (replicate collectStreamResponse pattern).
@@ -215,6 +220,7 @@ async function consumeStream(
   const seenToolResultIds = new Set<string>();
   const permissionRequests: PermissionRequestInfo[] = [];
   let capturedSdkSessionId: string | null = null;
+  let capturedCodexSessionId: string | null = null;
 
   try {
     while (true) {
@@ -317,8 +323,12 @@ async function consumeStream(
             try {
               const statusData = JSON.parse(event.data);
               if (statusData.session_id) {
-                capturedSdkSessionId = statusData.session_id;
-                store.updateSdkSessionId(sessionId, statusData.session_id);
+                if (statusData.agent === 'codex') {
+                  capturedCodexSessionId = statusData.session_id;
+                } else {
+                  capturedSdkSessionId = statusData.session_id;
+                  store.updateSdkSessionId(sessionId, statusData.session_id);
+                }
               }
               if (statusData.model) {
                 store.updateSessionModel(sessionId, statusData.model);
@@ -348,8 +358,12 @@ async function consumeStream(
               if (resultData.usage) tokenUsage = resultData.usage;
               if (resultData.is_error) hasError = true;
               if (resultData.session_id) {
-                capturedSdkSessionId = resultData.session_id;
-                store.updateSdkSessionId(sessionId, resultData.session_id);
+                if (resultData.agent === 'codex') {
+                  capturedCodexSessionId = resultData.session_id;
+                } else {
+                  capturedSdkSessionId = resultData.session_id;
+                  store.updateSdkSessionId(sessionId, resultData.session_id);
+                }
               }
             } catch { /* skip */ }
             break;
@@ -397,6 +411,7 @@ async function consumeStream(
       errorMessage,
       permissionRequests,
       sdkSessionId: capturedSdkSessionId,
+      codexSessionId: capturedCodexSessionId,
     };
   } catch (e) {
     // Best-effort save on stream error
@@ -429,6 +444,7 @@ async function consumeStream(
       errorMessage: isAbort ? 'Task stopped by user' : (e instanceof Error ? e.message : 'Stream consumption error'),
       permissionRequests,
       sdkSessionId: capturedSdkSessionId,
+      codexSessionId: capturedCodexSessionId,
     };
   }
 }
