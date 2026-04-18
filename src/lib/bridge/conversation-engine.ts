@@ -151,12 +151,15 @@ export async function processMessage(
       default: permissionMode = 'acceptEdits'; break;
     }
 
-    // Load conversation history for context
-    const { messages: recentMsgs } = store.getMessages(sessionId, { limit: 50 });
-    const historyMsgs = recentMsgs.slice(0, -1).map(m => ({
-      role: m.role as 'user' | 'assistant',
-      content: m.content,
-    }));
+    // For imported CLI sessions, rely on the target session's own resume/thread state.
+    // Do not mix in bridge-side IM history, or the chat can drift toward the bridge's
+    // own meta-conversation instead of the selected CLI session's context.
+    const historyMsgs = (binding.sdkSessionId || binding.codexSessionId)
+      ? []
+      : store.getMessages(sessionId, { limit: 50 }).messages.slice(0, -1).map(m => ({
+          role: m.role as 'user' | 'assistant',
+          content: m.content,
+        }));
 
     const abortController = new AbortController();
     if (abortSignal) {
@@ -404,11 +407,15 @@ async function consumeStream(
       .join('')
       .trim();
 
+    const finalErrorMessage = hasError
+      ? (errorMessage || responseText || 'The session returned an error without details.')
+      : '';
+
     return {
       responseText,
       tokenUsage,
       hasError,
-      errorMessage,
+      errorMessage: finalErrorMessage,
       permissionRequests,
       sdkSessionId: capturedSdkSessionId,
       codexSessionId: capturedCodexSessionId,

@@ -488,7 +488,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const state = this.activeCards.get(chatId);
     if (!state || !this.restClient) return;
 
-    const content = buildStreamingContent(state.pendingText || '', state.toolCalls);
+    const cardJson = buildStreamingContent(state.pendingText || '', state.toolCalls);
 
     state.sequence++;
     const seq = state.sequence;
@@ -497,7 +497,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
     // Fire-and-forget — streaming updates are non-critical
     (this.restClient as any).cardkit.v1.card.update({
       path: { card_id: cardId },
-      data: { type: 'card_json', data: content, sequence: seq },
+      data: {
+        card: { type: 'card_json', data: cardJson },
+        sequence: seq,
+      },
     }).then(() => {
       state.lastUpdateAt = Date.now();
     }).catch((err: unknown) => {
@@ -540,24 +543,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
 
     try {
-      // Step 1: Close streaming mode (if API available)
-      // v1 API may not have streamingMode.set, so we try-catch and continue
-      state.sequence++;
-      try {
-        // Try v1 settings API first
-        const restClientAny = this.restClient as any;
-        if (restClientAny.cardkit?.v1?.card?.settings) {
-          await restClientAny.cardkit.v1.card.settings({
-            path: { card_id: state.cardId },
-            data: { streaming_mode: false, sequence: state.sequence },
-          });
-        }
-      } catch {
-        // If streaming mode API not available, just continue
-        console.log('[feishu-adapter] Streaming mode API not available, skipping');
-      }
-
-      // Step 2: Build and apply final card
+      // Step 1: Build and apply final card.
+      // CardKit v1's settings endpoint is inconsistent across tenants and can reject
+      // the payload shape even when final card updates succeed, so finalize directly.
       const statusLabels: Record<string, string> = {
         completed: '✅ Completed',
         interrupted: '⚠️ Interrupted',
@@ -575,7 +563,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
       const restClientAny = this.restClient as any;
       await restClientAny.cardkit.v1.card.update({
         path: { card_id: state.cardId },
-        data: { type: 'card_json', data: finalCardJson, sequence: state.sequence },
+        data: {
+          card: { type: 'card_json', data: finalCardJson },
+          sequence: state.sequence,
+        },
       });
 
       console.log(`[feishu-adapter] Card finalized: cardId=${state.cardId}, status=${status}, elapsed=${formatElapsed(elapsedMs)}`);

@@ -6,6 +6,7 @@
  */
 
 import type { ChannelAddress, ChannelBinding, ChannelType } from './types.js';
+import type { CliSession } from './host.js';
 import { getBridgeContext } from './context.js';
 
 /**
@@ -93,58 +94,7 @@ export function bindToSession(
   if (jsonStore.getCliSession) {
     const cliSession = jsonStore.getCliSession(sessionId);
     if (cliSession) {
-      const isCodex = cliSession.agent === 'codex';
-
-      // Create a new BridgeSession for this CLI session
-      const newSession = store.createSession(
-        `CLI Import: ${cliSession.sessionId.slice(0, 8)}`,
-        '',        // default model
-        undefined, // systemPrompt
-        cliSession.cwd,
-        'code',
-      );
-
-      let binding;
-      if (isCodex) {
-        // Codex thread: store the thread ID as codexSessionId, not sdkSessionId
-        binding = store.upsertChannelBinding({
-          channelType: address.channelType,
-          chatId: address.chatId,
-          codepilotSessionId: newSession.id,
-          sdkSessionId: '',
-          codexSessionId: cliSession.sessionId,
-          workingDirectory: cliSession.cwd,
-          model: '',
-          mode: 'code',
-          agent: 'codex',
-        } as any);
-        // Codex threads have no OS takeover file — skip markSessionTakenOver
-      } else {
-        // Claude CLI: keep existing behaviour
-        if (jsonStore.updateSdkSessionId) {
-          jsonStore.updateSdkSessionId(newSession.id, cliSession.sessionId);
-        }
-        binding = store.upsertChannelBinding({
-          channelType: address.channelType,
-          chatId: address.chatId,
-          codepilotSessionId: newSession.id,
-          sdkSessionId: cliSession.sessionId,
-          workingDirectory: cliSession.cwd,
-          model: '',
-          mode: 'code',
-          agent: 'claude',
-        } as any);
-        if (binding && jsonStore.markSessionTakenOver) {
-          jsonStore.markSessionTakenOver(
-            cliSession.sessionId,
-            address.channelType,
-            address.chatId,
-            address.displayName,
-          );
-        }
-      }
-
-      return binding;
+      return bindToCliSession(address, cliSession);
     }
   }
 
@@ -187,6 +137,67 @@ export function updateBinding(
   updates: Partial<Pick<ChannelBinding, 'sdkSessionId' | 'codexSessionId' | 'workingDirectory' | 'model' | 'mode' | 'active' | 'agent'>>,
 ): void {
   getBridgeContext().store.updateChannelBinding(id, updates);
+}
+
+/**
+ * Create or update a channel binding from an already-resolved CLI session.
+ * This avoids a second store lookup when the caller already has the session metadata.
+ */
+export function bindToCliSession(
+  address: ChannelAddress,
+  cliSession: Pick<CliSession, 'sessionId' | 'cwd' | 'agent'>,
+): ChannelBinding {
+  const { store } = getBridgeContext();
+  const jsonStore = store as any;
+  const isCodex = cliSession.agent === 'codex';
+
+  const newSession = store.createSession(
+    `CLI Import: ${cliSession.sessionId.slice(0, 8)}`,
+    '',
+    undefined,
+    cliSession.cwd,
+    'code',
+  );
+
+  if (isCodex) {
+    return store.upsertChannelBinding({
+      channelType: address.channelType,
+      chatId: address.chatId,
+      codepilotSessionId: newSession.id,
+      sdkSessionId: '',
+      codexSessionId: cliSession.sessionId,
+      workingDirectory: cliSession.cwd,
+      model: '',
+      mode: 'code',
+      agent: 'codex',
+    } as any);
+  }
+
+  if (jsonStore.updateSdkSessionId) {
+    jsonStore.updateSdkSessionId(newSession.id, cliSession.sessionId);
+  }
+
+  const binding = store.upsertChannelBinding({
+    channelType: address.channelType,
+    chatId: address.chatId,
+    codepilotSessionId: newSession.id,
+    sdkSessionId: cliSession.sessionId,
+    workingDirectory: cliSession.cwd,
+    model: '',
+    mode: 'code',
+    agent: 'claude',
+  } as any);
+
+  if (jsonStore.markSessionTakenOver) {
+    jsonStore.markSessionTakenOver(
+      cliSession.sessionId,
+      address.channelType,
+      address.chatId,
+      address.displayName,
+    );
+  }
+
+  return binding;
 }
 
 /**

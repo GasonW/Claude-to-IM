@@ -64,6 +64,8 @@ interface UnifiedSessionItem {
   isActive: boolean;
   /** Start timestamp for sorting */
   startedAt: number;
+  /** Short preview of the last user message in this bridge session */
+  lastUserMessage: string | null;
 }
 
 // ── Shared Functions ──────────────────────────────────────────────
@@ -109,6 +111,7 @@ function buildUnifiedSessionList(
       startedAt: sessionWithTs?.created_at
         ? new Date(sessionWithTs.created_at).getTime()
         : new Date(b.createdAt || 0).getTime(),
+      lastUserMessage: getLastUserMessagePreview(b.codepilotSessionId),
     };
     if (item.agent === 'codex') codexItems.push(item);
     else claudeItems.push(item);
@@ -133,6 +136,7 @@ function buildUnifiedSessionList(
       cwd: c.cwd,
       isActive: c.isActive,
       startedAt: c.startedAt,
+      lastUserMessage: null,
     };
     if (item.agent === 'codex') codexItems.push(item);
     else claudeItems.push(item);
@@ -160,6 +164,48 @@ function getShortPathName(cwd: string): string {
   }
   const parts = cwd.split('/').filter(Boolean);
   return parts[parts.length - 1] || '~';
+}
+
+/**
+ * Turn a raw stored user message into a short single-line preview.
+ */
+function formatUserMessagePreview(content: string): string | null {
+  if (!content) return null;
+
+  const hasFileMeta = content.includes('<!--files:');
+  const cleaned = content
+    .replace(/<!--files:[\s\S]*?-->/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  let preview = cleaned;
+  if (!preview && hasFileMeta) {
+    preview = '[附件]';
+  }
+
+  if (!preview) return null;
+  if (preview.length <= 48) return preview;
+  return preview.slice(0, 48).trimEnd() + '...';
+}
+
+/**
+ * Read the last user message for a bridge session, if available.
+ */
+function getLastUserMessagePreview(sessionId: string): string | null {
+  const { store } = getBridgeContext();
+  const { messages } = store.getMessages(sessionId, { limit: 50 });
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role !== 'user') continue;
+    return formatUserMessagePreview(message.content);
+  }
+
+  return null;
+}
+
+function getSessionSnapshotKey(channelType: string, chatId: string): string {
+  return `${channelType}:${chatId}`;
 }
 
 // ── Chinese Keyword Command Mapping ─────────────────────────────
@@ -462,6 +508,8 @@ interface BridgeManagerState {
   activeTasks: Map<string, AbortController>;
   /** Per-session processing chains for concurrency control */
   sessionLocks: Map<string, Promise<void>>;
+  /** Latest /sessions snapshot shown to each chat, keyed by channelType:chatId */
+  sessionListSnapshots: Map<string, UnifiedSessionItem[]>;
   autoStartChecked: boolean;
 }
 
@@ -476,12 +524,16 @@ function getState(): BridgeManagerState {
       loopAborts: new Map(),
       activeTasks: new Map(),
       sessionLocks: new Map(),
+      sessionListSnapshots: new Map(),
       autoStartChecked: false,
     };
   }
   // Backfill sessionLocks for states created before this field existed
   if (!g[GLOBAL_KEY].sessionLocks) {
     g[GLOBAL_KEY].sessionLocks = new Map();
+  }
+  if (!g[GLOBAL_KEY].sessionListSnapshots) {
+    g[GLOBAL_KEY].sessionListSnapshots = new Map();
   }
   return g[GLOBAL_KEY];
 }
@@ -1045,7 +1097,8 @@ async function handleMessage(
     if (hasStreamingCards && adapter.onStreamEnd) {
       try {
         const status = result.hasError ? 'error' : 'completed';
-        cardFinalized = await adapter.onStreamEnd(msg.address.chatId, status, result.responseText);
+        const finalCardText = result.responseText || (result.hasError ? result.errorMessage : '');
+        cardFinalized = await adapter.onStreamEnd(msg.address.chatId, status, finalCardText);
       } catch (err) {
         console.warn('[bridge-manager] Card finalize failed:', err instanceof Error ? err.message : err);
       }
@@ -1227,15 +1280,22 @@ async function handleCommand(
       }
 
       const { store } = getBridgeContext();
+      const matchedItem = buildUnifiedSessionList(adapter.channelType).find(item => item.id === args);
 
       // Check if it's an active CLI session (for warning)
-      let isActiveCliSession = false;
-      if (store.getCliSession) {
+      let isActiveCliSession = matchedItem?.type === 'cli' && matchedItem.isActive;
+      if (!matchedItem && store.getCliSession) {
         const cliSession = store.getCliSession(args);
         isActiveCliSession = !!cliSession && cliSession.isActive;
       }
 
-      const binding = router.bindToSession(msg.address, args);
+      const binding = matchedItem?.type === 'cli'
+        ? router.bindToCliSession(msg.address, {
+            sessionId: matchedItem.id,
+            cwd: matchedItem.cwd,
+            agent: matchedItem.agent,
+          })
+        : router.bindToSession(msg.address, args);
 
       if (binding) {
         const lines = [];
@@ -1355,6 +1415,10 @@ async function handleCommand(
         );
 
         const displayedItems = items.slice(0, MAX_SESSIONS_TO_DISPLAY);
+        getState().sessionListSnapshots.set(
+          getSessionSnapshotKey(adapter.channelType, msg.address.chatId),
+          displayedItems,
+        );
 
         // Split into Claude and Codex groups, keeping their global index
         const claudeItems: Array<{ item: UnifiedSessionItem; globalIdx: number }> = [];
@@ -1391,6 +1455,9 @@ async function handleCommand(
 
             lines.push(`#${globalIdx} ${dot} ${shortName}${currentMarker}`);
             lines.push(`├─ 📁 <code>${escapeHtml(item.cwd || '~')}</code>`);
+            if (item.lastUserMessage) {
+              lines.push(`├─ 💬 ${escapeHtml(item.lastUserMessage)}`);
+            }
             lines.push(`└─ 🆔 <code>${idShort}...</code> ${typeTag}`);
           }
         };
@@ -1446,8 +1513,11 @@ async function handleCommand(
         break;
       }
 
-      // Use shared function to build unified session list (same as /sessions)
-      const items = buildUnifiedSessionList(adapter.channelType);
+      // Prefer the last /sessions snapshot shown to this chat so /switch #N
+      // matches what the user just saw, even if the underlying CLI list changes.
+      const snapshotKey = getSessionSnapshotKey(adapter.channelType, msg.address.chatId);
+      const items = getState().sessionListSnapshots.get(snapshotKey)
+        || buildUnifiedSessionList(adapter.channelType).slice(0, MAX_SESSIONS_TO_DISPLAY);
 
       // Check if index is valid
       if (index > items.length) {
@@ -1461,7 +1531,13 @@ async function handleCommand(
       const isActiveCliSession = targetItem.type === 'cli' && targetItem.isActive;
 
       // Bind to this session
-      const binding = router.bindToSession(msg.address, targetItem.id);
+      const binding = targetItem.type === 'cli'
+        ? router.bindToCliSession(msg.address, {
+            sessionId: targetItem.id,
+            cwd: targetItem.cwd,
+            agent: targetItem.agent,
+          })
+        : router.bindToSession(msg.address, targetItem.id);
 
       if (binding) {
         // Sync the agent from the target session to the binding

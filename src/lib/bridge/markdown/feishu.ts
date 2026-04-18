@@ -126,7 +126,19 @@ export function buildStreamingContent(text: string, tools: ToolCallInfo[]): stri
   if (toolMd) {
     content = content ? `${content}\n\n${toolMd}` : toolMd;
   }
-  return content || '💭 Thinking...';
+  return JSON.stringify({
+    schema: '2.0',
+    config: { wide_screen_mode: true },
+    body: {
+      elements: [{
+        tag: 'markdown',
+        content: preprocessFeishuMarkdown(content || '💭 Thinking...'),
+        text_align: 'left',
+        text_size: 'normal',
+        element_id: 'streaming_content',
+      }],
+    },
+  });
 }
 
 /**
